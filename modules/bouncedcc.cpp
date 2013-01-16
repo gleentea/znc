@@ -137,12 +137,30 @@ public:
 		PutModule("UseClientIP: " + CString(GetNV("UseClientIP").ToBool()));
 	}
 
+ 	void PortRangeCommand(const CString& sLine) {
+		CString sStart = sLine.Token(1);
+		CString sEnd = sLine.Token(2);
+		u_short uStart = sStart.ToUShort();
+		u_short uEnd = sEnd.ToUShort();
+
+		if (uStart < 1024 || uEnd < 1024 || uStart > uEnd) {
+			PutModule("port range must be in 1024-65535");
+			return;
+		}
+		SetNV("PortRangeMin", sStart);
+		SetNV("PortRangeMax",sEnd);
+		PutModule("PortRange:" + CString(GetNV("PortRangeMin") + "-" + CString(GetNV("PortRangeMax"))));
+	}
+		
+    
 	MODCONSTRUCTOR(CBounceDCCMod) {
 		AddHelpCommand();
 		AddCommand("ListDCCs", static_cast<CModCommand::ModCmdFunc>(&CBounceDCCMod::ListDCCsCommand),
 			"", "List all active DCCs");
 		AddCommand("UseClientIP", static_cast<CModCommand::ModCmdFunc>(&CBounceDCCMod::UseClientIPCommand),
 			"<true|false>");
+		AddCommand("PortRange", static_cast<CModCommand::ModCmdFunc>(&CBounceDCCMod::PortRangeCommand),
+			"num","listen port range for DCC. ex)12345-12355");
 	}
 
 	virtual ~CBounceDCCMod() {}
@@ -155,6 +173,19 @@ public:
 		return GetNV("UseClientIP").ToBool();
 	}
 
+	bool IsGlobalIP(unsigned long uLongIP) {
+		if (uLongIP & 0xFFFF0000 == 0xc0a80000) { // 192.168.0.0/16
+			return false;
+		}
+		if (uLongIP & 0xFFF00000 == 0xac100000) { // 172.16.0.0/12
+			return false;
+		}
+		if (uLongIP & 0xFF000000 == 0x0a000000) { // 10.0.0.0/8
+			return false;
+		}
+		return true;
+	}
+
 	virtual EModRet OnUserCTCP(CString& sTarget, CString& sMessage) {
 		if (sMessage.Equals("DCC ", false, 4)) {
 			CString sType = sMessage.Token(1);
@@ -164,10 +195,14 @@ public:
 			unsigned long uFileSize = sMessage.Token(5).ToULong();
 			CString sIP = GetLocalDCCIP();
 
+			if (IsGlobalIP(uLongIP)) {
+				sIP = CUtils::GetIP(uLongIP);
+ 			}
 			if (!UseClientIP()) {
 				uLongIP = CUtils::GetLongIP(m_pClient->GetRemoteIP());
 			}
 
+			DEBUG("RemoteIP:" + m_pClient->GetRemoteIP() + ", LocalDCCIP:" + sIP);
 			if (sType.Equals("CHAT")) {
 				unsigned short uBNCPort = CDCCBounce::DCCRequest(sTarget, uLongIP, uPort, "", true, this, "");
 				if (uBNCPort) {
@@ -445,8 +480,28 @@ void CDCCBounce::PutPeer(const CString& sLine) {
 
 unsigned short CDCCBounce::DCCRequest(const CString& sNick, unsigned long uLongIP, unsigned short uPort, const CString& sFileName, bool bIsChat, CBounceDCCMod* pMod, const CString& sRemoteIP) {
 	CDCCBounce* pDCCBounce = new CDCCBounce(pMod, uLongIP, uPort, sFileName, sNick, sRemoteIP, bIsChat);
-	unsigned short uListenPort = CZNC::Get().GetManager().ListenRand("DCC::" + CString((bIsChat) ? "Chat" : "Xfer") + "::Local::" + sNick,
-			pMod->GetLocalDCCIP(), false, SOMAXCONN, pDCCBounce, 120);
+	u_short uStart = pMod->GetNV("PortRangeMin").ToUShort();
+	u_short uEnd = pMod->GetNV("PortRangeMax").ToUShort();
+	u_short uListenPort = 0;
+	bool bRet = false;
+	if (uStart < 1024 || uEnd < 1024 || uStart > uEnd) {
+	   	       // if port range is not valid, listen random port.
+		       	   	uListenPort = CZNC::Get().GetManager().ListenRand("DCC::" + CString((bIsChat) ? "Chat" : "Xfer") + "::Local::" + sNick,
+						pMod->GetLocalDCCIP(), false, SOMAXCONN, pDCCBounce, 120);
+	} else {
+		for (u_short uTmpPort = uStart; uPort < uEnd; ++uTmpPort) {
+		 	bRet = CZNC::Get().GetManager().ListenHost(uTmpPort,
+					"DCC::" + CString((bIsChat) ? "Chat" : "Xfer") + "::Local::" + sNick,
+					pMod->GetLocalDCCIP(), false, SOMAXCONN, pDCCBounce, 120);
+			if (bRet) {
+			   	uListenPort = uTmpPort;
+				break;
+			}
+		}
+		if (!bRet) {
+			pMod->PutModule("*** Usable port not availavle (port range:" + pMod->GetNV("PortRangeMin") + "-" + pMod->GetNV("PortRangeMax") + ") ***");
+		}
+	}
 
 	return uListenPort;
 }
